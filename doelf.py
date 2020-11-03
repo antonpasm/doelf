@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 #  doelf
-#  30/10/2020
+#  04/11/2020
 #
 #  PASm
 #
@@ -15,14 +15,16 @@
 #  (at your option) any later version.
 #
 
+# TODO: ADD Comments
+# TODO: ADD Type Declaration
+
 PLUG_NAME = "doelf"
 
 ELF_E_MACHINE = 0
 
 WRITE_PROGRAM_HEADERS = True    # ELF will contain program headers
 WRITE_SYMBOLS = True            # ELF will contain Symbols information
-
-ADD_COMMENT = False             # todo. Symbols information will contain IDA comments
+WRITE_COMMENTS = True           # stupid stub
 
 import os
 import sys
@@ -33,8 +35,8 @@ try:
     import idaapi
     USE_IDA = True
 except:
-        print("ERROR: The plugin must be run in IDA")
-        sys.exit(0)
+    print("ERROR: The plugin must be run in IDA")
+    sys.exit(0)
 
 if USE_IDA:
     from idc import *
@@ -529,7 +531,7 @@ class ELF(object):
         else:
             st_shndx = self.find_section_id(sh_name)
             if not st_shndx:
-                log("ERROR: Section ID for '%s' not found" % sh_name)
+                log("ERROR: Section ID for '%s' for label '%s' not found" % (sh_name, name))
                 return None
 
         s = self._Elf_Sym()
@@ -578,7 +580,7 @@ class ELF(object):
         sh_offset = ph_offset + pdhr_num*self.ElfHeader.e_phentsize
         data_offset = sh_offset + shdr_num*self.ElfHeader.e_shentsize
 
-        self.ElfHeader.e_phoff = ph_offset
+        self.ElfHeader.e_phoff = ph_offset if pdhr_num else 0
         self.ElfHeader.e_shoff = sh_offset
 
 
@@ -647,7 +649,15 @@ def concatbytes(l):
     return bytearray().join([bytearray(i) for i in l])
 
 
-def write_symbols(output_file, is32, islsb, ep, segments, symbols):
+def fix_ep(start):
+    # for Thumb mode on ARM, the address must be +1
+    if GetReg(start, 't') > 0:
+        return start+1
+    # do nothing for everything else
+    return start
+
+
+def write_symbols(output_file, is32, islsb, e_machine, ep, segments, symbols):
     try:
         if len(segments) < 1:
             log("No segments to export")
@@ -657,14 +667,14 @@ def write_symbols(output_file, is32, islsb, ep, segments, symbols):
             log("No symbols to export")
 
         log("Building ELF...")
-
         elf = ELF(is32=is32, islsb=islsb)
-        elf.ElfHeader.e_entry = ep
+        elf.ElfHeader.e_machine = e_machine
+        elf.ElfHeader.e_entry = fix_ep(ep)
 
-        log("EI_CLASS:   %s" % 'ELFCLASS32' if elf.ElfHeader.e_ident[ELFFlags.EI_CLASS] else 'ELFCLASS64')
-        log("EI_DATA:    %s" % 'ELFDATA2LSB' if elf.ElfHeader.e_ident[ELFFlags.EI_DATA] else 'ELFDATA2MSB')
+        log("EI_CLASS:   %s" % ('ELFCLASS32' if elf.ElfHeader.e_ident[ELFFlags.EI_CLASS] == ELFFlags.ELFCLASS32 else 'ELFCLASS64'))
+        log("EI_DATA:    %s" % ('ELFDATA2LSB' if elf.ElfHeader.e_ident[ELFFlags.EI_DATA] == ELFFlags.ELFDATA2LSB else 'ELFDATA2MSB'))
         log("e_machine:  %d" % elf.ElfHeader.e_machine)
-        log("Entry point: 0x%X" % ep)
+        log("Entry point: 0x%X" % elf.ElfHeader.e_entry)
 
         elf.append_section_null()       # empty section
         elf.append_section_strtab()     # strtab section names
@@ -720,21 +730,27 @@ def write_symbols(output_file, is32, islsb, ep, segments, symbols):
 
 # Get is 32
 def get_ida_is32():
-    return not idaapi.cvar.inf.is_64bit()      # not shure
+    return not cvar.inf.is_64bit()      # not shure
 
 
 # Get LSB
 def get_ida_islsb():
-    return not idaapi.cvar.inf.mf   # not shure
+    # for compatibility with different versions of ida, I'll try to use the 'as_unicode' function
+    return ord((as_unicode(b'\x55'))[0]) == 0x55
 
 
 # Get EP
 def get_ida_ep():
-    i = GetEntryPointQty()
-    if i:
-        return GetEntryOrdinal(0)
-    else:
-        return get_imagebase()
+    ep = GetLongPrm(INF_START_IP)   # looks like main entry
+    if ep == BADADDR:
+        ep = next(Entries(), None)  # get first EP
+        if ep:
+            ep = ep[2]  # ea
+        else:
+            log("WARNING: Entry Point not set! Use the following command to add Entry Point")
+            log('AddEntryPoint(ea, ea, "name", True)')
+            return 0
+    return ep
 
 
 # Get Segments
@@ -759,6 +775,10 @@ def get_ida_segments():
         #     flags |= SHFlags.SHF_ALLOC
         p_flags = permission
         segments.append(Segment(name, address, size, bin, type, align, flags, p_flags))
+
+    if WRITE_PROGRAM_HEADERS and len([x for x in segments if type == SHTypes.SHT_PROGBITS]) == 0:
+        log('WARNING: You don\'t have fully initialized segments. Ensure that code segments do not include uninitialized areas ')
+
     return segments
 
 
@@ -781,57 +801,74 @@ def get_ida_symbols_simple():
 
 def get_ida_symbols():
     symbols = []
+    
+    def addsymbol(name, bind, type, address, size, shname):
+        # bind = STB_GLOBAL
+        # type = STT_FUNC
+        symbols.append(Symbol(name, bind, type, address, size, shname))
+        # log((hex(address), {STB_LOCAL: 'LOCAL', STB_GLOBAL: 'GLOBAL', STB_WEAK: 'WEAK', STB_NUM: 'NUM'}.get(bind, bind), {STT_NOTYPE: 'NOTYPE', STT_OBJECT: 'OBJECT', STT_FUNC: 'FUNC'}.get(type, type), name))
+
+    def addcomment(text, address, shname):
+        if WRITE_COMMENTS:
+            bind = STB_WEAK
+            type = STT_NOTYPE
+            # bind = STB_GLOBAL
+            # type = STT_FUNC
+            symbols.append(Symbol(text, bind, type, address, 0, shname))
+        # log((hex(address), 'Comment: ', text))
+
     startEA = cvar.inf.minEA
     endEA = cvar.inf.maxEA
     while (startEA < endEA):
         f = get_flags_novalue(startEA)
 
-        # todo: how to determine that the name is local?
-        #  inverse function of set_name ?
-        #  how get flags SN_ from EA?
+        segname = SegName(startEA)
 
-        if isFunc(f):
-            name = get_func_name(startEA)
-            func = get_func(startEA)
-            start = func.startEA
-            size = func.endEA - start
-            segname = SegName(startEA)
-            # Add function name
-            symbols.append(Symbol(name, STB_GLOBAL, STT_FUNC, start, size, segname))
+        if segname:
+            fn = None
 
-        else:
-            if f & FF_NAME:
-                name = get_true_name(startEA)
-                # name = get_short_name(startEA)
-                bind = STB_GLOBAL
-                if not name:
-                    name = get_name(startEA, startEA)   # not sure
-                    bind = STB_LOCAL
-                start = startEA
+            if isFunc(f):
+                fn = get_func(startEA)
+                start = fix_ep(startEA)
+                size = fn.endEA - startEA
+                name = get_ea_name(startEA, GN_DEMANGLED)
+                addsymbol(name, STB_GLOBAL, STT_FUNC, start, size, segname)
+                namel = get_ea_name(startEA, GN_DEMANGLED | GN_LOCAL)
+                if namel and namel != name:
+                    addsymbol(namel, STB_WEAK, STT_FUNC, start, size, segname)
+
+            elif f & FF_NAME or f & FF_LABL:
+                t = STT_OBJECT if isData(f) else STT_NOTYPE
                 size = 0
-                segname = SegName(startEA)
-                # Add global name
-                symbols.append(Symbol(name, bind, STT_OBJECT, start, size, segname))
+                name = get_ea_name(startEA, GN_DEMANGLED)                 # global name
+                namel = get_ea_name(startEA, GN_DEMANGLED | GN_LOCAL)     # local name, or global name
+                if namel:
+                    if namel != name:
+                        if name:
+                            addsymbol(name, STB_GLOBAL, t, startEA, size, segname)
+                        addsymbol(namel, STB_LOCAL, t, startEA, size, segname)
+                    else:
+                        # local == global => global
+                        addsymbol(name, STB_GLOBAL, t, startEA, size, segname)
 
-            if f & FF_LABL:
-                name = get_true_name(startEA)
-                # name = get_short_name(startEA)
-                name_l = ''
-                start = startEA
-                size = 0
-                segname = SegName(startEA)
-                # Add label
-                symbols.append(Symbol(name, STB_GLOBAL, STT_OBJECT, start, size, segname))
-                if f & FF_NAME:
-                    # Имя уже есть, пробуем получить label
-                    func = get_func(startEA)
-                    if func:
-                        name_l = get_name(func.startEA, startEA)
-                        if name_l and name_l != name:
-                            # Add local(?) label
-                            symbols.append(Symbol(name_l, STB_LOCAL, STT_OBJECT, start, size, segname))
+            if f & FF_COMM:
+                if fn:
+                    # Add function comments
+                    cmtr = get_func_cmt(fn, True)
+                    cmtn = get_func_cmt(fn, False)
+                    if cmtr:
+                        addcomment(cmtr, startEA, segname)
+                    if cmtn:
+                        addcomment(cmtn, startEA, segname)
 
-            if ADD_COMMENT and (f & FF_LINE):
+                cmtr = get_cmt(startEA, True)
+                cmtn = get_cmt(startEA, False)
+                if cmtr:
+                    addcomment(cmtr, startEA, segname)
+                if cmtn:
+                    addcomment(cmtn, startEA, segname)
+
+            if f & FF_LINE:
                 cmt = []
                 i = 0
                 while (True):
@@ -850,43 +887,76 @@ def get_ida_symbols():
                     cmt.append(l)
                     i += 1
                 name_p = 'r\n'.join(cmt)
-                start = startEA
-                size = 0
-                segname = SegName(startEA)
-                # Stub. Todo
                 if name_a:
-                    symbols.append(Symbol(name_a, STB_LOCAL, STT_OBJECT, start, size, segname))
+                    addcomment(name_a, startEA, segname)
                 if name_p:
-                    symbols.append(Symbol(name_p, STB_LOCAL, STT_OBJECT, next_not_tail(start), size, segname))
-
-            if ADD_COMMENT and (f & FF_COMM):
-                name_r = get_cmt(startEA, True)
-                name_n = get_cmt(startEA, False)
-                start = startEA
-                size = 0
-                segname = SegName(startEA)
-                # Stub. Todo
-                if name_r:
-                    symbols.append(Symbol(name_r, STB_LOCAL, STT_OBJECT, start, size, segname))
-                if name_n:
-                    symbols.append(Symbol(name_n, STB_LOCAL, STT_OBJECT, start, size, segname))
+                    addcomment(name_p, next_not_tail(startEA), segname)
 
         startEA = next_not_tail(startEA)
     return symbols
 
 
 class DoElf(Form):
-    def __init__(self):
-        Form.__init__(self, ("DoELF\n"
-                             "<Output ELF ~f~ile:{txtFile}>\n"
-                             "\n"
-                             ), {
-                          'txtFile': Form.FileInput(save=True)
+    def __init__(self, is32, islsb, em, ep, file):
+        Form.__init__(self,
+r"""DoELF - Produce ELF file 
+EI_CLASS    <ELFCLASS~3~2 :{rClass32}><ELFCLASS~6~4 :{rClass64}>{rGroupClass}>
+EI_DATA     <ELFDATA2~L~SB:{rDataLsb}><ELFDATA2~M~SB:{rDataMsb}>{rGroupData}>
+<e_~m~achine   :{intEM}>
+<~E~ntry point :{intEP}>
+
+<ELF ~f~ile:{bFile}>
+""", {
+                'rGroupClass': Form.RadGroupControl(("rClass32", "rClass64"), 0 if is32 else 1),
+                'rGroupData': Form.RadGroupControl(("rDataLsb", "rDataMsb"), 0 if islsb else 1),
+                'intEM': Form.NumericInput(swidth=35, value=em),
+                'intEP': Form.NumericInput(swidth=35, value=ep),
+                'bFile': Form.FileInput(open=True, value=file),
                       })
 
     def Show(self):
         self.Compile()
         return self.Execute()
+
+    @property
+    def is32(self):
+        return self.rGroupClass.value == 0
+
+    @property
+    def islsb(self):
+        return self.rGroupData.value == 0
+
+    @property
+    def em(self):
+        return self.intEM.value
+
+    @property
+    def ep(self):
+        return self.intEP.value
+
+    @property
+    def file(self):
+        return self.bFile.value
+
+
+class DoElf_store:
+    def __init__(self):
+        self.v = {}
+
+    @staticmethod
+    def set(var, value):
+        global doelf_store
+        doelf_store.v[var] = value
+        return value
+
+    @staticmethod
+    def get(var, default):
+        global doelf_store
+        if 'doelf_store' not in globals():
+            doelf_store = DoElf_store()
+        if var not in doelf_store.v:
+            doelf_store.v[var] = default
+        return doelf_store.v[var]
 
 
 class DoElf_t(plugin_t):
@@ -900,21 +970,34 @@ class DoElf_t(plugin_t):
         return PLUGIN_OK
 
     def run(self, arg=0):
-        f = DoElf()
+
+        is32 = DoElf_store.get('is32', get_ida_is32())
+        islsb = DoElf_store.get('islsb', get_ida_islsb())
+        em = DoElf_store.get('em', ELF_E_MACHINE)
+        ep = DoElf_store.get('ep', get_ida_ep())
+        file = DoElf_store.get('file', '')
+
+        f = DoElf(is32, islsb, em, ep, file)
         if f.Show():
-            output_file = f.txtFile.value
-            if os.path.exists(output_file):
-                s = "Output file already exists\n" \
-                    "The output file already exists. " \
-                    "Do you want to overwrite it?"
-                if bool(AskUsingForm(s, "1")):
-                    os.remove(output_file)
-                else:
-                    log('Elf not saved')
-                    return
-            write_symbols(output_file,
-                          get_ida_is32(), get_ida_islsb(),
-                          get_ida_ep(), get_ida_segments(), get_ida_symbols())
+            is32 = DoElf_store.set('is32', f.is32)
+            islsb = DoElf_store.set('islsb', f.islsb)
+            em = DoElf_store.set('em', f.em)
+            ep = DoElf_store.set('ep', f.ep)
+            file = DoElf_store.set('file', f.file)
+            if file:
+                if os.path.exists(file):
+                    s = "Output file already exists\n" \
+                        "The output file already exists. " \
+                        "Do you want to overwrite it?"
+                    if bool(AskUsingForm(s, "1")):
+                        os.remove(file)
+                    else:
+                        log('Elf not saved')
+                        return
+            else:
+                log('Elf not saved! Specify file name')
+                return
+            write_symbols(file, is32, islsb, em, ep, get_ida_segments(), get_ida_symbols())
             f.Free()
 
     def term(self):
