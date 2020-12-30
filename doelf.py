@@ -25,6 +25,7 @@ ELF_E_MACHINE = 0
 WRITE_PROGRAM_HEADERS = True    # ELF will contain program headers
 WRITE_SYMBOLS = True            # ELF will contain Symbols information
 WRITE_COMMENTS = True           # stupid stub
+ALL_GLOBAL = True
 
 import os
 import sys
@@ -411,7 +412,8 @@ class Strtab():
     def append(self, name):
         if name is not None:
             o = len(self._raw)
-            self._raw.extend(name.encode('ascii') + b'\x00')
+            # self._raw.extend(name.encode('ascii') + b'\x00')
+            self._raw.extend(bytearray(name.decode('cp866').encode('utf-8')) + b'\x00')
             return o
         else:
             return SHN_UNDEF
@@ -755,6 +757,14 @@ def get_ida_ep():
 
 # Get Segments
 def get_ida_segments():
+
+    def GetManyBytes(address, size):
+        r = [getFlags(ea) for ea in range(address, address+size)]
+        if all([hasValue(f) for f in r]):
+            return bytearray([f & MS_VAL for f in r])
+        else:
+            return None
+
     segments = []
     for s in Segments():
         address = SegStart(s)
@@ -803,8 +813,9 @@ def get_ida_symbols():
     symbols = []
     
     def addsymbol(name, bind, type, address, size, shname):
-        # bind = STB_GLOBAL
-        # type = STT_FUNC
+        if ALL_GLOBAL:
+            bind = STB_GLOBAL
+            type = STT_FUNC
         symbols.append(Symbol(name, bind, type, address, size, shname))
         # log((hex(address), {STB_LOCAL: 'LOCAL', STB_GLOBAL: 'GLOBAL', STB_WEAK: 'WEAK', STB_NUM: 'NUM'}.get(bind, bind), {STT_NOTYPE: 'NOTYPE', STT_OBJECT: 'OBJECT', STT_FUNC: 'FUNC'}.get(type, type), name))
 
@@ -812,8 +823,9 @@ def get_ida_symbols():
         if WRITE_COMMENTS:
             bind = STB_WEAK
             type = STT_NOTYPE
-            # bind = STB_GLOBAL
-            # type = STT_FUNC
+            if ALL_GLOBAL:
+                bind = STB_GLOBAL
+                type = STT_FUNC
             symbols.append(Symbol(text, bind, type, address, 0, shname))
         # log((hex(address), 'Comment: ', text))
 
@@ -911,7 +923,7 @@ EI_DATA     <ELFDATA2~L~SB:{rDataLsb}><ELFDATA2~M~SB:{rDataMsb}>{rGroupData}>
                 'rGroupData': Form.RadGroupControl(("rDataLsb", "rDataMsb"), 0 if islsb else 1),
                 'intEM': Form.NumericInput(swidth=35, value=em),
                 'intEP': Form.NumericInput(swidth=35, value=ep),
-                'bFile': Form.FileInput(open=True, value=file),
+                'bFile': Form.FileInput(save=True, value=file),
                       })
 
     def Show(self):
