@@ -20,7 +20,7 @@
 
 PLUG_NAME = "doelf"
 
-ELF_E_MACHINE = 0
+ELF_E_MACHINE = 40
 
 WRITE_PROGRAM_HEADERS = True    # ELF will contain program headers
 WRITE_SYMBOLS = True            # ELF will contain Symbols information
@@ -41,8 +41,6 @@ except:
 
 if USE_IDA:
     from idc import *
-    from idaapi import *
-    from idautils import *
 
 SHN_UNDEF = 0
 
@@ -412,8 +410,12 @@ class Strtab():
     def append(self, name):
         if name is not None:
             o = len(self._raw)
-            # self._raw.extend(name.encode('ascii') + b'\x00')
-            self._raw.extend(bytearray(name.decode('cp866').encode('utf-8')) + b'\x00')
+            if sys.version_info[0] < 3:
+                # self._raw.extend(name.encode('ascii') + b'\x00')
+                # self._raw.extend(bytearray(name.decode('cp866').encode('utf-8')) + b'\x00')
+                self._raw.extend(bytearray(name) + b'\x00')
+            else:
+                self._raw.extend(bytearray(name.encode('utf-8')) + b'\x00')
             return o
         else:
             return SHN_UNDEF
@@ -653,7 +655,7 @@ def concatbytes(l):
 
 def fix_ep(start):
     # for Thumb mode on ARM, the address must be +1
-    if GetReg(start, 't') > 0:
+    if get_sreg(start, 't') > 0:
         return start+1
     # do nothing for everything else
     return start
@@ -738,12 +740,15 @@ def get_ida_is32():
 # Get LSB
 def get_ida_islsb():
     # for compatibility with different versions of ida, I'll try to use the 'as_unicode' function
-    return ord((as_unicode(b'\x55'))[0]) == 0x55
+    if sys.version_info[0] < 3:
+        return ord((as_unicode(b'\x55'))[0]) == 0x55
+    else:
+        return as_unicode(b'\x55')[0] == 0x55
 
 
 # Get EP
 def get_ida_ep():
-    ep = GetLongPrm(INF_START_IP)   # looks like main entry
+    ep = get_inf_attr(INF_START_IP)   # looks like main entry
     if ep == BADADDR:
         ep = next(Entries(), None)  # get first EP
         if ep:
@@ -759,20 +764,20 @@ def get_ida_ep():
 def get_ida_segments():
 
     def GetManyBytes(address, size):
-        r = [getFlags(ea) for ea in range(address, address+size)]
-        if all([hasValue(f) for f in r]):
+        r = [get_full_flags(ea) for ea in range(address, address+size)]
+        if all([has_value(f) for f in r]):
             return bytearray([f & MS_VAL for f in r])
         else:
             return None
 
     segments = []
     for s in Segments():
-        address = SegStart(s)
-        end = SegEnd(s)
+        address = get_segm_start(s)
+        end = get_segm_end(s)
         size = end-address
-        name = SegName(s)
-        align = GetSegmentAttr(s, SEGATTR_ALIGN)    # not sure
-        permission = GetSegmentAttr(s, SEGATTR_PERM)
+        name = get_segm_name(s)
+        align = get_segm_attr(s, SEGATTR_ALIGN)    # not sure
+        permission = get_segm_attr(s, SEGATTR_PERM)
         bin = GetManyBytes(address, size)
 
         type = SHTypes.SHT_PROGBITS if bin else SHTypes.SHT_NOBITS
@@ -794,7 +799,7 @@ def get_ida_segments():
 
 # Get Symbols
 def ida_fcn_filter(func_ea):
-    if SegName(func_ea) not in ("extern", ".plt"):
+    if get_segm_name(func_ea) not in ("extern", ".plt"):
         return True
 
 
@@ -802,10 +807,10 @@ def get_ida_symbols_simple():
     symbols = []
     for f in filter(ida_fcn_filter, Functions()):
         func     = get_func(f)
-        seg_name = SegName(f)
-        fn_name = GetFunctionName(f)
-        print(fn_name, hex(int(func.startEA)))
-        symbols.append(Symbol(fn_name, STB_GLOBAL, STT_FUNC, int(func.startEA), int(func.size()), seg_name))
+        seg_name = get_segm_name(f)
+        fn_name = get_func_name(f)
+        print(fn_name, hex(int(func.start_ea)))
+        symbols.append(Symbol(fn_name, STB_GLOBAL, STT_FUNC, int(func.start_ea), int(func.size()), seg_name))
     return symbols
 
 
@@ -817,7 +822,7 @@ def get_ida_symbols():
             bind = STB_GLOBAL
             type = STT_FUNC
         symbols.append(Symbol(name, bind, type, address, size, shname))
-        # log((hex(address), {STB_LOCAL: 'LOCAL', STB_GLOBAL: 'GLOBAL', STB_WEAK: 'WEAK', STB_NUM: 'NUM'}.get(bind, bind), {STT_NOTYPE: 'NOTYPE', STT_OBJECT: 'OBJECT', STT_FUNC: 'FUNC'}.get(type, type), name))
+        log((hex(address), {STB_LOCAL: 'LOCAL', STB_GLOBAL: 'GLOBAL', STB_WEAK: 'WEAK', STB_NUM: 'NUM'}.get(bind, bind), {STT_NOTYPE: 'NOTYPE', STT_OBJECT: 'OBJECT', STT_FUNC: 'FUNC'}.get(type, type), name))
 
     def addcomment(text, address, shname):
         if WRITE_COMMENTS:
@@ -832,17 +837,17 @@ def get_ida_symbols():
     startEA = cvar.inf.minEA
     endEA = cvar.inf.maxEA
     while (startEA < endEA):
-        f = get_flags_novalue(startEA)
+        f = get_flags(startEA)
 
-        segname = SegName(startEA)
+        segname = get_segm_name(startEA)
 
         if segname:
             fn = None
 
-            if isFunc(f):
+            if is_func(f):
                 fn = get_func(startEA)
                 start = fix_ep(startEA)
-                size = fn.endEA - startEA
+                size = fn.end_ea - startEA
                 name = get_ea_name(startEA, GN_DEMANGLED)
                 addsymbol(name, STB_GLOBAL, STT_FUNC, start, size, segname)
                 namel = get_ea_name(startEA, GN_DEMANGLED | GN_LOCAL)
@@ -850,7 +855,7 @@ def get_ida_symbols():
                     addsymbol(namel, STB_WEAK, STT_FUNC, start, size, segname)
 
             elif f & FF_NAME or f & FF_LABL:
-                t = STT_OBJECT if isData(f) else STT_NOTYPE
+                t = STT_OBJECT if is_data(f) else STT_NOTYPE
                 size = 0
                 name = get_ea_name(startEA, GN_DEMANGLED)                 # global name
                 namel = get_ea_name(startEA, GN_DEMANGLED | GN_LOCAL)     # local name, or global name
@@ -866,8 +871,8 @@ def get_ida_symbols():
             if f & FF_COMM:
                 if fn:
                     # Add function comments
-                    cmtr = get_func_cmt(fn, True)
-                    cmtn = get_func_cmt(fn, False)
+                    cmtr = get_func_cmt(startEA, True)
+                    cmtn = get_func_cmt(startEA, False)
                     if cmtr:
                         addcomment(cmtr, startEA, segname)
                     if cmtn:
@@ -884,7 +889,7 @@ def get_ida_symbols():
                 cmt = []
                 i = 0
                 while (True):
-                    l = LineA(startEA, i)
+                    l = get_extra_cmt(startEA, E_PREV + i)
                     if not l:
                         break
                     cmt.append(l)
@@ -893,7 +898,7 @@ def get_ida_symbols():
                 cmt = []
                 i = 0
                 while (True):
-                    l = LineB(startEA, i)
+                    l = get_extra_cmt(startEA, E_NEXT + i)
                     if not l:
                         break
                     cmt.append(l)
@@ -1001,7 +1006,7 @@ class DoElf_t(plugin_t):
                     s = "Output file already exists\n" \
                         "The output file already exists. " \
                         "Do you want to overwrite it?"
-                    if bool(AskUsingForm(s, "1")):
+                    if bool(ask_form(s, "1")):
                         os.remove(file)
                     else:
                         log('Elf not saved')
