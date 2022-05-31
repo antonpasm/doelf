@@ -18,6 +18,13 @@
 # TODO: ADD Comments
 # TODO: ADD Type Declaration
 
+#import os
+#import sys
+from idaapi import *
+from idc import *
+from idautils import *
+from ctypes import *
+
 PLUG_NAME = "doelf"
 
 ELF_E_MACHINE = 40
@@ -27,20 +34,6 @@ WRITE_SYMBOLS = True            # ELF will contain Symbols information
 WRITE_COMMENTS = True           # stupid stub
 ALL_GLOBAL = True
 
-import os
-import sys
-from ctypes import *
-
-USE_IDA = False
-try:
-    import idaapi
-    USE_IDA = True
-except:
-    print("ERROR: The plugin must be run in IDA")
-    sys.exit(0)
-
-if USE_IDA:
-    from idc import *
 
 SHN_UNDEF = 0
 
@@ -754,9 +747,11 @@ def get_ida_ep():
         if ep:
             ep = ep[2]  # ea
         else:
-            log("WARNING: Entry Point not set! Use the following command to add Entry Point")
-            log('AddEntryPoint(ea, ea, "name", True)')
-            return 0
+            ep = get_name_ea(BADADDR, 'main')
+            if ep == BADADDR:
+                log("WARNING: Entry Point not set! Use the following command to add Entry Point")
+                log('AddEntryPoint(ea, ea, "name", True)')
+                return 0
     return ep
 
 
@@ -987,7 +982,6 @@ class DoElf_t(plugin_t):
         return PLUGIN_OK
 
     def run(self, arg=0):
-
         is32 = DoElf_store.get('is32', get_ida_is32())
         islsb = DoElf_store.get('islsb', get_ida_islsb())
         em = DoElf_store.get('em', ELF_E_MACHINE)
